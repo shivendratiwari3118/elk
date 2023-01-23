@@ -32,7 +32,7 @@ data:
 
     
 ---
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1  #extensions/v1  #beta1
 kind: DaemonSet
 metadata:
   name: journalbeat
@@ -99,7 +99,7 @@ spec:
         emptyDir: {}
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1  #beta1
 kind: ClusterRoleBinding
 metadata:
   name: journalbeat
@@ -112,7 +112,7 @@ roleRef:
   name: journalbeat
   apiGroup: rbac.authorization.k8s.io
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1  #beta1
 kind: ClusterRole
 metadata:
   name: journalbeat

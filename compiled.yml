@@ -1,0 +1,1126 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ssd
+  namespace: monitoring
+parameters:
+  type: pd-ssd
+provisioner: kubernetes.io/gce-pd
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: auditbeat
+  name: auditbeat
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: filebeat
+  name: filebeat
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat
+  namespace: kube-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - namespaces
+  - events
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - extensions
+  resources:
+  - replicasets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - statefulsets
+  - deployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/stats
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    k8s-app: auditbeat
+  name: auditbeat
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  - namespaces
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    k8s-app: filebeat
+  name: filebeat
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  - pods
+  verbs:
+  - get
+  - watch
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: auditbeat
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: auditbeat
+subjects:
+- kind: ServiceAccount
+  name: auditbeat
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metricbeat
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: metricbeat
+subjects:
+- kind: ServiceAccount
+  name: metricbeat
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: filebeat
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: filebeat
+subjects:
+- kind: ServiceAccount
+  name: filebeat
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  auditbeat.yml: |-
+    auditbeat.config.modules:
+      # Mounted `auditbeat-daemonset-modules` configmap:
+      path: ${path.config}/modules.d/*.yml
+      # Reload module configs as they change:
+      reload.enabled: false
+
+    processors:
+      - add_cloud_metadata:
+      - add_host_metadata:
+
+    output.logstash.hosts: 'logstash-svc.monitoring.svc.cluster.local:5044'
+    setup.kibana.host: "http://kibana-svc.monitoring.svc.cluster.local:5601"
+    setup.dashboards.enabled: true
+    # setup.dashboards.index: "auditbeat-*"
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: auditbeat
+  name: auditbeat-config
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  system.yml: |-
+    - module: file_integrity
+      paths:
+      - /hostfs/bin
+      - /hostfs/usr/bin
+      - /hostfs/sbin
+      - /hostfs/usr/sbin
+      - /hostfs/etc
+      exclude_files:
+      - '(?i)\.sw[nop]$'
+      - '~$'
+      - '/\.git($|/)'
+      scan_at_start: true
+      scan_rate_per_sec: 50 MiB
+      max_file_size: 100 MiB
+      hash_types: [sha1]
+      recursive: true
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: auditbeat
+  name: auditbeat-daemonset-modules
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  filebeat.yml: |-
+    filebeat.inputs:
+      - type: container
+        paths:
+          - /var/log/containers/*.log
+        processors:
+          - add_kubernetes_metadata:
+              host: ${NODE_NAME}
+              matchers:
+              - logs_path:
+                  logs_path: "/var/log/containers/"
+    filebeat.modules:
+      - module: system
+        syslog:
+          enabled: true
+          #var.paths: ["/var/log/syslog"]
+        auth:
+          enabled: true
+          #var.paths: ["/var/log/authlog"]
+
+    # To enable hints based autodiscover, remove `filebeat.inputs` configuration and uncomment this:
+    filebeat.autodiscover:
+      providers:
+        - type: kubernetes
+          node: ${NODE_NAME}
+          hints.enabled: true
+          hints.default_config:
+            type: container
+            paths:
+              - /var/log/containers/*${data.kubernetes.container.id}.log
+
+    processors:
+      - add_cloud_metadata:
+      - add_kubernetes_metadata:
+      - add_host_metadata:
+
+    output.logstash.hosts: 'logstash-svc.monitoring.svc.cluster.local:5044'
+    setup.kibana.host: "http://kibana-svc.monitoring.svc.cluster.local:5601"
+    setup.dashboards.enabled: true
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: filebeat
+  name: filebeat-config
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  metricbeat.yml: |-
+    metricbeat.config.modules:
+      # Mounted `metricbeat-daemonset-modules` configmap:
+      path: ${path.config}/modules.d/*.yml
+      # Reload module configs as they change:
+      reload.enabled: false
+    # To enable hints based autodiscover uncomment this:
+    metricbeat.autodiscover:
+     providers:
+       - type: kubernetes
+         node: ${NODE_NAME}
+         hints.enabled: true
+    processors:
+      - add_cloud_metadata:
+    output.logstash.hosts: 'logstash-svc.monitoring.svc.cluster.local:5044'
+    setup.kibana.host: "http://kibana-svc.monitoring.svc.cluster.local:5601"
+    setup.dashboards.enabled: true
+    # setup.dashboards.index: "metricbeat-*"
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat-daemonset-config
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  kubernetes.yml: "- module: kubernetes\n  metricsets:\n    - node\n    - system\n
+    \   - pod\n    - container\n    - volume\n  period: 10s\n  host: ${NODE_NAME}\n
+    \ hosts: [\"localhost:10255\"]\n  # If using Red Hat OpenShift remove the previous
+    hosts entry and \n  # uncomment these settings:\n  #hosts: [\"https://${HOSTNAME}:10250\"]\n
+    \ #bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token\n  #ssl.certificate_authorities:\n
+    \   #- /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt\n- module:
+    kubernetes\n  metricsets:\n    - proxy\n  period: 10s\n  host: ${NODE_NAME}\n
+    \ hosts: [\"localhost:10249\"]"
+  system.yml: |-
+    - module: system
+      period: 10s
+      metricsets:
+        - cpu
+        - load
+        - memory
+        - network
+        - process
+        - process_summary
+        - core
+        - diskio
+        - socket
+      processes: ['.*']
+      process.include_top_n:
+        by_cpu: 5      # include top 5 processes by CPU
+        by_memory: 5   # include top 5 processes by memory
+    - module: system
+      period: 1m
+      metricsets:
+        - filesystem
+        - fsstat
+      processors:
+      - drop_event.when.regexp:
+          system.filesystem.mount_point: '^/(sys|cgroup|proc|dev|etc|host|lib)($|/)'
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat-daemonset-modules
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  metricbeat.yml: |-
+    metricbeat.config.modules:
+      # Mounted `metricbeat-daemonset-modules` configmap:
+      path: ${path.config}/modules.d/*.yml
+      # Reload module configs as they change:
+      reload.enabled: false
+
+    processors:
+      - add_cloud_metadata:
+      - add_host_metadata:
+    output.logstash.hosts: 'logstash-svc.monitoring.svc.cluster.local:5044'
+    setup.kibana.host: "http://kibana-svc.monitoring.svc.cluster.local:5601"
+    setup.dashboards.enabled: true
+    # setup.dashboards.index: "metricbeat-*"
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat-deployment-config
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  kubernetes.yml: |-
+    - module: kubernetes
+      metricsets:
+        - state_node
+        - state_deployment
+        - state_replicaset
+        - state_pod
+        - state_container
+        - state_cronjob
+        - state_resourcequota
+        # Uncomment this to get k8s events:
+        - event
+      period: 10s
+      host: ${NODE_NAME}
+      hosts: ["kube-state-metrics:8080"]
+kind: ConfigMap
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat-deployment-modules
+  namespace: kube-system
+---
+apiVersion: v1
+data:
+  apm-server.yml: |-
+    apm-server.host: "0.0.0.0:8200"
+    apm-server.rum.enabled: true
+    apm-server.capture_personal_data: true
+    apm-server.kibana.path: /kibana
+    apm-server.kibana.enabled: true
+    apm-server.kibana.host: "http://kibana-svc:5601"
+    setup.kibana.host: "http://kibana-svc:5601"
+    monitoring.enabled: true
+    monitoring.elasticsearch.hosts: "http://elasticsearch-svc:9200"
+    output.logstash.hosts: 'logstash-svc:5044'
+    # output.elasticsearch.hosts: '${ELASTICSEARCH_HOST:elasticsearch-svc}:${ELASTICSEARCH_PORT:9200}'
+kind: ConfigMap
+metadata:
+  labels:
+    app: apm-server
+  name: apm-server
+  namespace: monitoring
+---
+apiVersion: v1
+data:
+  kibana.yml: |-
+    elasticsearch.hosts: "http://elasticsearch-svc:9200"
+    xpack.monitoring.enabled: true
+    xpack.monitoring.kibana.collection.enabled: true
+    server.host: "0.0.0.0"
+kind: ConfigMap
+metadata:
+  labels:
+    app: kibana
+  name: kibana
+  namespace: monitoring
+---
+apiVersion: v1
+data:
+  logstash.yml: |-
+    http.host: "0.0.0.0"
+    path.config: /usr/share/logstash/pipeline
+    xpack.monitoring.enabled: true
+    xpack.monitoring.elasticsearch.hosts: "http://elasticsearch-svc:9200"
+  pipeline.conf: "input {\n  beats {\n    port => 5044\n  }\n}\noutput {\n  elasticsearch
+    {\n    hosts => ['http://elasticsearch-svc:9200']\n    index => \"%{[@metadata][beat]}-%{[@metadata][version]}-%{+YYYY.MM.dd}\"\n
+    \ }\n  stdout { \n    codec => rubydebug \n  }\n}"
+kind: ConfigMap
+metadata:
+  labels:
+    app: logstash
+  name: logstash
+  namespace: monitoring
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: apm-server
+  name: apm-server-svc
+  namespace: monitoring
+spec:
+  ports:
+  - name: http
+    port: 8200
+    targetPort: 8200
+  selector:
+    app: apm-server
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: elasticsearch
+  name: elasticsearch-svc
+  namespace: monitoring
+spec:
+  ports:
+  - name: http
+    port: 9200
+  - name: transport
+    port: 9300
+  selector:
+    app: elasticsearch
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: kibana
+  name: kibana-lb
+  namespace: monitoring
+spec:
+  ports:
+  - name: http
+    port: 5601
+    protocol: TCP
+    targetPort: 5601
+  selector:
+    app: kibana
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: kibana
+  name: kibana-svc
+  namespace: monitoring
+spec:
+  ports:
+  - name: http
+    port: 5601
+  selector:
+    app: kibana
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: logstash
+  name: logstash-svc
+  namespace: monitoring
+spec:
+  ports:
+  - name: http
+    port: 5044
+    targetPort: 5044
+  - name: api
+    port: 9600
+    targetPort: 9600
+  selector:
+    app: logstash
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: metricbeat
+  template:
+    metadata:
+      labels:
+        k8s-app: metricbeat
+    spec:
+      containers:
+      - args:
+        - -c
+        - /etc/metricbeat.yml
+        - -e
+        env:
+        - name: ELASTICSEARCH_HOST
+          value: elasticsearch-svc.monitoring.svc.cluster.local
+        - name: ELASTICSEARCH_PORT
+          value: "9200"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        image: docker.elastic.co/beats/metricbeat:7.6.0
+        name: metricbeat
+        resources:
+          limits:
+            cpu: 500m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/metricbeat.yml
+          name: config
+          readOnly: true
+          subPath: metricbeat.yml
+        - mountPath: /usr/share/metricbeat/modules.d
+          name: modules
+          readOnly: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      serviceAccountName: metricbeat
+      volumes:
+      - configMap:
+          defaultMode: 384
+          name: metricbeat-deployment-config
+        name: config
+      - configMap:
+          defaultMode: 384
+          name: metricbeat-deployment-modules
+        name: modules
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: apm-server
+  name: apm-server
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apm-server
+  template:
+    metadata:
+      labels:
+        app: apm-server
+    spec:
+      containers:
+      - image: docker.elastic.co/apm/apm-server:7.6.0
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          tcpSocket:
+            port: 8200
+        name: apm-server
+        ports:
+        - containerPort: 8200
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          tcpSocket:
+            port: 8200
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512M
+          requests:
+            cpu: 100m
+            memory: 256M
+        volumeMounts:
+        - mountPath: /usr/share/apm-server/apm-server.yml
+          name: apm-server-settings-config-volume
+          readOnly: true
+          subPath: apm-server.yml
+      volumes:
+      - configMap:
+          name: apm-server
+        name: apm-server-settings-config-volume
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kibana
+  name: kibana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - env:
+        - name: SERVER_UUID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.uid
+        - name: SERVER_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        image: docker.elastic.co/kibana/kibana:7.6.0
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 60
+          tcpSocket:
+            port: 5601
+          timeoutSeconds: 10
+        name: kibana
+        ports:
+        - containerPort: 5601
+          name: http
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 10
+          httpGet:
+            path: /app/kibana
+            port: 5601
+          initialDelaySeconds: 60
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512M
+          requests:
+            cpu: 50m
+            memory: 256M
+        volumeMounts:
+        - mountPath: /usr/share/kibana/config
+          name: kibana-settings-config-volume
+      volumes:
+      - configMap:
+          items:
+          - key: kibana.yml
+            path: kibana.yml
+          name: kibana
+        name: kibana-settings-config-volume
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: logstash
+  name: logstash
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logstash
+  template:
+    metadata:
+      labels:
+        app: logstash
+    spec:
+      containers:
+      - command:
+        - logstash
+        image: docker.elastic.co/logstash/logstash:7.6.0
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          tcpSocket:
+            port: 5044
+        name: logstash
+        ports:
+        - containerPort: 5044
+          name: http
+          protocol: TCP
+        - containerPort: 9600
+          name: api
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          tcpSocket:
+            port: 5044
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512M
+          requests:
+            cpu: 100m
+            memory: 256M
+        volumeMounts:
+        - mountPath: /usr/share/logstash/config
+          name: logstash-settings-config-volume
+        - mountPath: /usr/share/logstash/pipeline
+          name: logstash-pipeline-config-volume
+      volumes:
+      - configMap:
+          items:
+          - key: logstash.yml
+            path: logstash.yml
+          name: logstash
+        name: logstash-settings-config-volume
+      - configMap:
+          items:
+          - key: pipeline.conf
+            path: pipeline.conf
+          name: logstash
+        name: logstash-pipeline-config-volume
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: monitoring
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  serviceName: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - elasticsearch
+              topologyKey: kubernetes.io/hostname
+            weight: 100
+      containers:
+      - env:
+        - name: cluster.name
+          value: monitoring
+        - name: node.name
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: discovery.seed_hosts
+          value: elasticsearch-svc
+        - name: cluster.initial_master_nodes
+          value: elasticsearch-0,elasticsearch-1,elasticsearch-2
+        - name: ES_JAVA_OPTS
+          value: -Xms256m -Xmx256m
+        - name: xpack.security.enabled
+          value: "false"
+        - name: xpack.monitoring.enabled
+          value: "true"
+        - name: xpack.monitoring.collection.enabled
+          value: "true"
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.6.0
+        livenessProbe:
+          failureThreshold: 10
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          tcpSocket:
+            port: 9300
+        name: elasticsearch
+        ports:
+        - containerPort: 9200
+          name: http
+          protocol: TCP
+        - containerPort: 9300
+          name: transport
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 10
+          httpGet:
+            path: /_cluster/health?local=true
+            port: 9200
+            scheme: HTTP
+          initialDelaySeconds: 15
+          timeoutSeconds: 10
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1G
+          requests:
+            cpu: 100m
+            memory: 512m
+        volumeMounts:
+        - mountPath: /usr/share/elasticsearch/data
+          name: data
+      initContainers:
+      - command:
+        - sh
+        - -c
+        - chown -R 1000:1000 /usr/share/elasticsearch/data
+        image: busybox
+        name: fix-ownership
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /usr/share/elasticsearch/data
+          name: data
+      - command:
+        - sysctl
+        - -w
+        - vm.max_map_count=262144
+        image: busybox
+        name: increase-vm-max-map
+        securityContext:
+          privileged: true
+      - command:
+        - sh
+        - -c
+        - ulimit -n 65536
+        image: busybox
+        name: increase-fd-ulimit
+        securityContext:
+          privileged: true
+  updateStrategy:
+    type: RollingUpdate
+  volumeClaimTemplates:
+  - metadata:
+      labels:
+        app: elasticsearch
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 500Gi
+      storageClassName: standard
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: auditbeat
+  name: auditbeat
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: auditbeat
+  template:
+    metadata:
+      labels:
+        k8s-app: auditbeat
+    spec:
+      containers:
+      - args:
+        - -c
+        - /etc/auditbeat.yml
+        env:
+        - name: ELASTICSEARCH_HOST
+          value: elasticsearch-svc.monitoring.svc.cluster.local
+        - name: ELASTICSEARCH_PORT
+          value: "9200"
+        image: docker.elastic.co/beats/auditbeat:7.6.0
+        name: auditbeat
+        resources:
+          limits:
+            cpu: 500m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/auditbeat.yml
+          name: config
+          readOnly: true
+          subPath: auditbeat.yml
+        - mountPath: /usr/share/auditbeat/modules.d
+          name: modules
+          readOnly: true
+        - mountPath: /hostfs/bin
+          name: bin
+          readOnly: true
+        - mountPath: /hostfs/sbin
+          name: sbin
+          readOnly: true
+        - mountPath: /hostfs/usr/bin
+          name: usrbin
+          readOnly: true
+        - mountPath: /hostfs/usr/sbin
+          name: usrsbin
+          readOnly: true
+        - mountPath: /hostfs/etc
+          name: etc
+          readOnly: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      serviceAccountName: auditbeat
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /bin
+        name: bin
+      - hostPath:
+          path: /usr/bin
+        name: usrbin
+      - hostPath:
+          path: /sbin
+        name: sbin
+      - hostPath:
+          path: /usr/sbin
+        name: usrsbin
+      - hostPath:
+          path: /etc
+        name: etc
+      - configMap:
+          defaultMode: 384
+          name: auditbeat-config
+        name: config
+      - configMap:
+          defaultMode: 384
+          name: auditbeat-daemonset-modules
+        name: modules
+      - hostPath:
+          path: /var/lib/auditbeat-data
+          type: DirectoryOrCreate
+        name: data
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: filebeat
+  name: filebeat
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: filebeat
+  template:
+    metadata:
+      labels:
+        k8s-app: filebeat
+    spec:
+      containers:
+      - args:
+        - -c
+        - /etc/filebeat.yml
+        - -e
+        env:
+        - name: ELASTICSEARCH_HOST
+          value: elasticsearch-svc.monitoring.svc.cluster.local
+        - name: ELASTICSEARCH_PORT
+          value: "9200"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        image: docker.elastic.co/beats/filebeat:7.6.0
+        name: filebeat
+        resources:
+          limits:
+            cpu: 500m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/filebeat.yml
+          name: config
+          readOnly: true
+          subPath: filebeat.yml
+        - mountPath: /usr/share/filebeat/data
+          name: data
+        - mountPath: /var/lib/docker/containers
+          name: varlibdockercontainers
+          readOnly: true
+        - mountPath: /var/log
+          name: varlog
+          readOnly: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - configMap:
+          defaultMode: 384
+          name: filebeat-config
+        name: config
+      - hostPath:
+          path: /var/lib/docker/containers
+        name: varlibdockercontainers
+      - hostPath:
+          path: /var/log
+        name: varlog
+      - hostPath:
+          path: /var/lib/filebeat-data
+          type: DirectoryOrCreate
+        name: data
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    k8s-app: metricbeat
+  name: metricbeat
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: metricbeat
+  template:
+    metadata:
+      labels:
+        k8s-app: metricbeat
+    spec:
+      containers:
+      - args:
+        - -c
+        - /etc/metricbeat.yml
+        - -e
+        - -system.hostfs=/hostfs
+        env:
+        - name: ELASTICSEARCH_HOST
+          value: elasticsearch-svc.monitoring.svc.cluster.local
+        - name: ELASTICSEARCH_PORT
+          value: "9200"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        image: docker.elastic.co/beats/metricbeat:7.6.0
+        name: metricbeat
+        resources:
+          limits:
+            cpu: 500m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 100Mi
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /etc/metricbeat.yml
+          name: config
+          readOnly: true
+          subPath: metricbeat.yml
+        - mountPath: /usr/share/metricbeat/modules.d
+          name: modules
+          readOnly: true
+        - mountPath: /var/run/docker.sock
+          name: dockersock
+        - mountPath: /hostfs/proc
+          name: proc
+          readOnly: true
+        - mountPath: /hostfs/sys/fs/cgroup
+          name: cgroup
+          readOnly: true
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      serviceAccountName: metricbeat
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - hostPath:
+          path: /proc
+        name: proc
+      - hostPath:
+          path: /sys/fs/cgroup
+        name: cgroup
+      - hostPath:
+          path: /var/run/docker.sock
+        name: dockersock
+      - configMap:
+          defaultMode: 384
+          name: metricbeat-daemonset-config
+        name: config
+      - configMap:
+          defaultMode: 384
+          name: metricbeat-daemonset-modules
+        name: modules
+      - hostPath:
+          path: /var/lib/metricbeat-data
+          type: DirectoryOrCreate
+        name: data

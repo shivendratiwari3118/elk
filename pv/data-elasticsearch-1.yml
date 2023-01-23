@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: data-elasticsearch-1
+  namespace: monitoring
+  labels:
+    type: local
+spec:
+  storageClassName: standard
+  capacity:
+    storage: 1000Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data-elasticsearch-1"
